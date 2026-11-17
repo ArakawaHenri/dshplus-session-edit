@@ -8,6 +8,7 @@ import Projections from '@deepseek-ai/dsh-session-projection';
 import Agents from '@deepseek-ai/dsh-agent';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native';
 import AgentLoop from '@deepseek-ai/dsh-agent-loop';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import * as Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl';
@@ -46,7 +47,6 @@ export const chunks = (value, reason = { kind: 'stop' }) => [
 
 const controllerRoot = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-api-session-controller'));
 const { ApiSessionAgentController } = await import(pathToFileURL(join(controllerRoot, 'types/agent.js')));
-const { installModelSelectionProjection } = await import(pathToFileURL(join(controllerRoot, 'types/model-selection-projection.js')));
 
 export async function createRuntime(t, config = {}, runtimeOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-service-runtime-'));
@@ -68,9 +68,12 @@ export async function createRuntime(t, config = {}, runtimeOptions = {}) {
 
   new SessionStore(ctx);
   new Projections(ctx);
-  new Agents(ctx);
+  // The registry registers its turn-boundary projection during init, and the
+  // loop reads it while creating an Agent, so await the service before use.
+  await mount(Agents, {});
   await mount(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false });
   await mount(Tools, {});
+  await mount(NativeToolExecutor, {});
 
   class OfflineLlm extends Service {
     constructor() {
@@ -115,7 +118,8 @@ export async function createRuntime(t, config = {}, runtimeOptions = {}) {
     currentSelection: () => ({ provider: 'offline', model: 'stub' }),
   });
   ctx.provide('typert', { lookups: { configure() {} }, contexts: { configureHost() {} } });
-  installModelSelectionProjection(ctx);
+  // The Agent loop registers the modelSelection projection itself, and the
+  // controller installs model-selection notices in each Agent's setup scope.
   const controller = new ApiSessionAgentController(ctx);
   ctx.provide('sessionController', { resolveAgent: id => controller.resolveAgent(id) });
 
@@ -138,7 +142,6 @@ export async function createRuntime(t, config = {}, runtimeOptions = {}) {
     handles,
     engine,
     host,
-    agentController: controller,
     setResponse(fn) {
       const previous = response;
       response = fn;
@@ -151,7 +154,6 @@ export async function createRuntime(t, config = {}, runtimeOptions = {}) {
         meta: { cwd: root, ...options.meta },
         ...(options.seed ? { seed: options.seed } : {}),
         ...(options.inheritedEventCount === undefined ? {} : { inheritedEventCount: options.inheritedEventCount }),
-        ...(options.parentAgent ? { parentAgent: options.parentAgent } : {}),
         agentOptions: { provider: 'offline', model: 'stub' },
       });
       handles.push(handle);
