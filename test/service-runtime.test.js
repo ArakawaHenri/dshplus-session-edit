@@ -89,7 +89,7 @@ test('editing stops the old running turn and preserves the title and current mod
   const source = await f.createSource();
   const target = userEvents(await f.send(source.agent, 'Selected input.'))[0];
   source.agent.session.append('session/title', { title: 'My conversation', messageSeqs: [], source: { kind: 'user' } });
-  f.agentController.selectForNextRequest(source.agent, { provider: 'offline', model: 'current-model' });
+  source.agent.model.select({ provider: 'offline', model: 'current-model' });
   await f.stop(source.agent, 'Later stopped input.');
   const started = Promise.withResolvers();
   let canceled = false;
@@ -120,9 +120,9 @@ test('editing stops the old running turn and preserves the title and current mod
 test('retry keeps a model selected while an older request was being prepared', options, async t => {
   const f = await createRuntime(t);
   const source = await f.createSource();
-  f.agentController.selectionFor(source.agent);
+  source.agent.model.current();
   const target = userEvents(await f.send(source.agent, 'Selected input.'))[0];
-  f.agentController.selectForNextRequest(source.agent, { provider: 'offline', model: 'model-a' });
+  source.agent.model.select({ provider: 'offline', model: 'model-a' });
 
   const preparing = Promise.withResolvers();
   const release = Promise.withResolvers();
@@ -139,7 +139,7 @@ test('retry keeps a model selected while an older request was being prepared', o
   try {
     source.agent.followup(human('Later input.'));
     await preparing.promise;
-    f.agentController.selectForNextRequest(source.agent, { provider: 'offline', model: 'model-b' });
+    source.agent.model.select({ provider: 'offline', model: 'model-b' });
   } finally {
     release.resolve();
   }
@@ -152,17 +152,34 @@ test('retry keeps a model selected while an older request was being prepared', o
   assert.equal(f.requests.at(-1).model, 'model-b');
 });
 
-test('runtime-owned Agents cannot be edited even when their durable header has no parent lineage', options, async t => {
+test('a member of a live subagent tree cannot be edited even when its header has no lineage', options, async t => {
   const f = await createRuntime(t);
   const owner = await f.createSource();
-  const child = await f.createSource({ parentAgent: owner.agent });
+  const child = await f.createSource();
   const events = await f.send(child.agent, 'Managed agent input.');
   assert.equal(child.agent.session.header.parentSession, undefined);
   assert.equal(child.agent.session.header.origin, undefined);
-  assert.equal(f.ctx.agents.isOwnedBy(child.agent.id, owner.agent), true);
+  // DSH 0.2.1-rc.3 removed runtime ownership from the Agent registry: the
+  // subagent service resolves the live tree root instead.
+  f.ctx.provide('subagents', { rootOf: agent => (agent === child.agent ? owner.agent : agent) });
+  assert.equal(f.ctx.subagents.rootOf(child.agent), owner.agent);
   const inspection = await f.engine.inspect({ sessionId: child.agent.id });
   assert.equal(inspection.ordinary, false);
   await assert.rejects(f.submit(editCommand(child.agent, userEvents(events)[0])), code('owned-session'));
+});
+
+test('a delegated Agent without a live tree root is not ordinary', options, async t => {
+  const f = await createRuntime(t);
+  const source = await f.createSource();
+  const events = await f.send(source.agent, 'Delegated input.');
+  f.ctx.provide('subagents', {
+    rootOf: () => {
+      throw new Error('agent has no active runtime owner');
+    },
+  });
+  const inspection = await f.engine.inspect({ sessionId: source.agent.id });
+  assert.equal(inspection.ordinary, false);
+  await assert.rejects(f.submit(editCommand(source.agent, userEvents(events)[0])), code('owned-session'));
 });
 
 test('exact message resolution stays read-only for a cold session', options, async t => {
